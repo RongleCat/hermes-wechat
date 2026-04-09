@@ -30,7 +30,7 @@
 
 ## 关于本项目
 
-**Hermes WeChat Adapter** 是一个为 [Hermes Agent](https://github.com/anthropics/hermes) 开发的微信个人号接入适配器，基于 **iLink Bot API**（微信官方开放协议）实现。
+**Hermes WeChat Adapter** 是一个为 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 开发的微信个人号接入适配器，基于 **iLink Bot API**（微信官方开放协议）实现。
 
 > **这个项目由 Hermes Agent 自己编写、整理并提交到仓库。** 从代码开发到文档撰写再到 Git 提交，全部由 AI 自主完成 —— 这本身就是 Hermes 能力的最好证明。
 
@@ -96,7 +96,7 @@ Hermes 的平台适配器采用**内置注册制** —— 所有平台（Telegra
 
 ### 前置要求
 
-- [Hermes Agent](https://github.com/anthropics/hermes) 已安装运行
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) 已安装运行
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) 包管理器
 - 一个微信个人号（用于扫码登录）
@@ -329,6 +329,8 @@ Token 过期或服务端会话失效。适配器会自动暂停 10 分钟后重�
 </details>
 
 完整踩坑手册见 [SKILL.md](./SKILL.md)。
+
+> **遇到任何问题，直接和你的 Hermes Agent 沟通即可。** 把错误信息或日志发给它，它会自动诊断并帮你修复 —— 不需要联系作者，不需要提 Issue，Hermes 自己就能解决。
 
 ---
 
