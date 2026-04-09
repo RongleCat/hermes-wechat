@@ -166,6 +166,18 @@ def _aes128_ecb_padded_size(plaintext_size: int) -> int:
     return ((plaintext_size + 1 + 15) // 16) * 16
 
 
+def _aes128_ecb_decrypt(ciphertext: bytes, key: bytes) -> bytes:
+    """AES-128-ECB decryption with PKCS7 unpadding."""
+    cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+    dec = cipher.decryptor()
+    padded = dec.update(ciphertext) + dec.finalize()
+    # Remove PKCS7 padding
+    pad_len = padded[-1]
+    if pad_len < 1 or pad_len > 16:
+        return padded  # Not padded, return as-is
+    return padded[:-pad_len]
+
+
 # ── context token persistence ─────────────────────────────────────────────────
 
 class ContextTokenStore:
@@ -655,11 +667,13 @@ async def qr_login(
         # Try qrcode-in-terminal
         try:
             import qrcode as _qrcode
-            import io
-            qr = _qrcode.make(qrcode_url)
-            print("（终端中显示二维码失败时请直接访问上方 URL）")
+            qr = _qrcode.QRCode()
+            qr.add_data(qrcode_url)
+            qr.make(fit=True)
+            # Print ASCII QR code to terminal (requires `uv add qrcode`)
+            qr.print_ascii(invert=True)
         except Exception:
-            pass
+            print("（终端中显示二维码失败时请直接访问上方 URL）")
 
         # Step 2: poll for scan result
         deadline = time.time() + timeout_s
@@ -969,7 +983,7 @@ class WeixinAdapter(BasePlatformAdapter):
 
                 # Process messages
                 for msg in (resp.get("msgs") or []):
-                    asyncio.create_task(self._process_message(msg))
+                    asyncio.create_task(self._process_message_safe(msg))
 
             except asyncio.CancelledError:
                 break
@@ -987,9 +1001,25 @@ class WeixinAdapter(BasePlatformAdapter):
 
     # ── Inbound message processing ────────────────────────────────────────────
 
+    async def _process_message_safe(self, msg: Dict[str, Any]) -> None:
+        """Wrapper around _process_message that catches and logs exceptions."""
+        try:
+            await self._process_message(msg)
+        except Exception as e:
+            logger.error("weixin: unhandled error processing msg from %s: %s",
+                         (msg.get("from_user_id") or "?")[:8], e, exc_info=True)
+
     async def _process_message(self, msg: Dict[str, Any]) -> None:
         """Process one inbound WeixinMessage."""
         from_user_id = msg.get("from_user_id", "")
+
+        # DEBUG: dump raw message structure for media messages (debug-level only)
+        item_list = msg.get("item_list") or []
+        has_media = any(item.get("type") in (ITEM_IMAGE, ITEM_VIDEO, ITEM_VOICE) for item in item_list)
+        if has_media or not any(item.get("type") == ITEM_TEXT for item in item_list):
+            logger.debug("weixin: raw_msg from=%s keys=%s items=%s",
+                          from_user_id[:8], list(msg.keys()),
+                          json.dumps(item_list, ensure_ascii=False)[:1000])
 
         # Filter self-messages
         if self._account_id and from_user_id == self._account_id:
@@ -1021,37 +1051,140 @@ class WeixinAdapter(BasePlatformAdapter):
         item_list: List[Dict[str, Any]] = msg.get("item_list") or []
         text = self._extract_text(item_list)
         images: List[str] = []
+        media_types: List[str] = []
 
-        # Download media (image only for now; voice handled as text via voice_item.text)
+        # Download media (image, video, file, voice) — including quoted references
         for item in item_list:
             if item.get("type") == ITEM_IMAGE:
                 path = await self._download_image(item)
                 if path:
                     images.append(path)
-                break
-            if item.get("type") == ITEM_VOICE:
+                    media_types.append("image")
+            elif item.get("type") == ITEM_VIDEO:
+                path = await self._download_video(item)
+                if path:
+                    images.append(path)
+                    media_types.append("video")
+            elif item.get("type") == ITEM_FILE:
+                file_item = item.get("file_item") or {}
+                file_name = file_item.get("file_name", "document")
+                path = await self._download_file(item)
+                if path:
+                    images.append(path)
+                    media_types.append("document")
+                    # Inject filename so agent knows what was sent
+                    if not text:
+                        text = f"[文件: {file_name}]"
+                    else:
+                        text = f"[文件: {file_name}]\n{text}"
+            elif item.get("type") == ITEM_VOICE:
                 # Use transcribed text if available
                 voice_text = (item.get("voice_item") or {}).get("text", "")
                 if voice_text and not text:
                     text = voice_text
-                break
+
+        # Also download media from quoted/referenced messages
+        for ref_item in self._extract_ref_items(item_list):
+            rtype = ref_item.get("type", 0)
+            if rtype == ITEM_IMAGE:
+                path = await self._download_image(ref_item)
+                if path:
+                    images.append(path)
+                    media_types.append("image")
+            elif rtype == ITEM_FILE:
+                fi = ref_item.get("file_item") or {}
+                fn = fi.get("file_name", "引用文件")
+                path = await self._download_file(ref_item)
+                if path:
+                    images.append(path)
+                    media_types.append("document")
+                    # Note: filename already injected by _extract_text → _describe_ref_item,
+                    # so no need to add it again here.
+            elif rtype == ITEM_VIDEO:
+                path = await self._download_video(ref_item)
+                if path:
+                    images.append(path)
+                    media_types.append("video")
 
         # Build session source + dispatch
+        # Detect group chat: iLink uses to_user_id as group ID for group messages,
+        # and may include a room_id field. Single-chat: to_user_id == bot's own ID.
+        to_user_id = msg.get("to_user_id", "")
+        is_group = (
+            to_user_id != self._account_id
+            and bool(msg.get("room_id") or msg.get("chat_room_id"))
+        ) or (msg.get("msg_type") == 1)  # msg_type 1 = group in some iLink versions
+        chat_type = "group" if is_group else "dm"
+        effective_chat_id = msg.get("room_id") or msg.get("chat_room_id") or from_user_id
+
         source = self.build_source(
-            chat_id=from_user_id,
+            chat_id=effective_chat_id,
             user_id=from_user_id,
-            chat_type="dm",
+            chat_type=chat_type,
         )
         event = MessageEvent(
             source=source,
             text=text,
-            message_type=MessageType.IMAGE if images else MessageType.TEXT,
+            message_type=MessageType.PHOTO if images else MessageType.TEXT,
             message_id=str(msg_id) if msg_id else None,
+            media_urls=images,
+            media_types=media_types or ["image"] * len(images),
         )
 
         logger.info("weixin: inbound from=%s text_len=%d images=%d",
                     from_user_id[:8], len(text), len(images))
         await self.handle_message(event)
+
+    # ── Reference / quote helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _describe_ref_item(ref_item: Dict[str, Any]) -> str:
+        """Return human-readable description of a quoted/referenced item."""
+        itype = ref_item.get("type", 0)
+        if itype == ITEM_FILE:
+            fi = ref_item.get("file_item") or {}
+            name = fi.get("file_name", "文件")
+            size = fi.get("len", "?")
+            return f"引用文件: {name} ({size}字节)"
+        if itype == ITEM_IMAGE:
+            ii = ref_item.get("image_item") or {}
+            mi = ii.get("media") or {}
+            w = ii.get("thumb_width", "?")
+            h = ii.get("thumb_height", "?")
+            size = mi.get("mid_size", "?")
+            return f"引用图片 ({w}x{h}, ~{size}字节)"
+        if itype == ITEM_VIDEO:
+            return "引用视频"
+        if itype == ITEM_VOICE:
+            vi = ref_item.get("voice_item") or {}
+            vt = vi.get("text", "")
+            if vt:
+                return f'引用语音: "{vt[:80]}"'
+            return "引用语音"
+        return ""
+
+    def _extract_ref_items(self, item_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Extract all referenced/quoted media items from item_list.
+        
+        When a user quotes a message (image/file/video) and adds text,
+        iLink puts the original item inside ref_msg.message_item.
+        This method pulls those out so they can be downloaded alongside
+        the main message content.
+        """
+        refs: List[Dict[str, Any]] = []
+        for item in item_list:
+            if item.get("type") != ITEM_TEXT:
+                continue
+            ref = item.get("ref_msg")
+            if not ref:
+                continue
+            ref_item = ref.get("message_item") or {}
+            rtype = ref_item.get("type", 0)
+            if rtype in (ITEM_IMAGE, ITEM_VIDEO, ITEM_FILE):
+                refs.append(ref_item)
+        return refs
+
+    # ── Text extraction ─────────────────────────────────────────────────────
 
     def _extract_text(self, item_list: List[Dict[str, Any]]) -> str:
         """Extract text body from item_list, including quoted message context."""
@@ -1061,10 +1194,13 @@ class WeixinAdapter(BasePlatformAdapter):
                 ref = item.get("ref_msg")
                 if not ref:
                     return text
-                # Quoted media → pass text only
                 ref_item = ref.get("message_item") or {}
-                if ref_item.get("type") in (ITEM_IMAGE, ITEM_VIDEO, ITEM_FILE, ITEM_VOICE):
-                    return text
+                rtype = ref_item.get("type", 0)
+                # Quoted media → inject description so agent knows what was referenced
+                if rtype in (ITEM_IMAGE, ITEM_VIDEO, ITEM_FILE, ITEM_VOICE):
+                    desc = self._describe_ref_item(ref_item)
+                    prefix = f"[{desc}]\n" if desc else ""
+                    return prefix + text
                 # Quoted text → prepend context
                 parts = []
                 if ref.get("title"):
@@ -1091,9 +1227,76 @@ class WeixinAdapter(BasePlatformAdapter):
             async with self._session.get(full_url, timeout=_aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.ok:
                     data = await resp.read()
+                    # Decrypt AES-128-ECB encrypted CDN data
+                    # aes_key is base64(hex_string), e.g. "ZWZhNTVl...==" → b'efa55e7c...' → 16 raw bytes
+                    aes_key_b64 = media.get("aes_key", "")
+                    if aes_key_b64:
+                        import base64
+                        hex_encoded = base64.b64decode(aes_key_b64)
+                        try:
+                            aes_key = bytes.fromhex(hex_encoded.decode())
+                        except Exception:
+                            aes_key = hex_encoded  # fallback: use as-is
+                        data = _aes128_ecb_decrypt(data, aes_key)
                     return cache_image_from_bytes(data, ".jpg")
         except Exception as e:
             logger.warning("weixin: image download failed: %s", e)
+        return None
+
+    async def _download_video(self, item: Dict[str, Any]) -> Optional[str]:
+        """Download and cache an inbound video item."""
+        video_item = item.get("video_item") or {}
+        media = video_item.get("media") or {}
+        full_url = media.get("full_url", "")
+        if not full_url:
+            return None
+        try:
+            async with self._session.get(full_url, timeout=_aiohttp.ClientTimeout(total=120)) as resp:
+                if resp.ok:
+                    data = await resp.read()
+                    # Decrypt AES-128-ECB encrypted CDN data
+                    # aes_key is base64(hex_string), e.g. "ZWZhNTVl...==" → b'efa55e7c...' → 16 raw bytes
+                    aes_key_b64 = media.get("aes_key", "")
+                    if aes_key_b64:
+                        import base64
+                        hex_encoded = base64.b64decode(aes_key_b64)
+                        try:
+                            aes_key = bytes.fromhex(hex_encoded.decode())
+                        except Exception:
+                            aes_key = hex_encoded  # fallback: use as-is
+                        data = _aes128_ecb_decrypt(data, aes_key)
+                    # Cache as document (video file) for agent processing
+                    return cache_document_from_bytes(data, ".mp4")
+        except Exception as e:
+            logger.warning("weixin: video download failed: %s", e)
+        return None
+
+    async def _download_file(self, item: Dict[str, Any]) -> Optional[str]:
+        """Download and cache an inbound file item (PDF, doc, etc.)."""
+        file_item = item.get("file_item") or {}
+        media = file_item.get("media") or {}
+        full_url = media.get("full_url", "")
+        file_name = file_item.get("file_name", "document")
+        if not full_url:
+            return None
+        try:
+            async with self._session.get(full_url, timeout=_aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.ok:
+                    data = await resp.read()
+                    # Decrypt AES-128-ECB encrypted CDN data
+                    aes_key_b64 = media.get("aes_key", "")
+                    if aes_key_b64:
+                        import base64
+                        hex_encoded = base64.b64decode(aes_key_b64)
+                        try:
+                            aes_key = bytes.fromhex(hex_encoded.decode())
+                        except Exception:
+                            aes_key = hex_encoded  # fallback
+                        data = _aes128_ecb_decrypt(data, aes_key)
+                    # Use original filename for extension detection
+                    return cache_document_from_bytes(data, file_name)
+        except Exception as e:
+            logger.warning("weixin: file download failed: %s", e)
         return None
 
     async def _maybe_fetch_typing_ticket(
@@ -1206,12 +1409,14 @@ class WeixinAdapter(BasePlatformAdapter):
 
         try:
             if image_url.startswith(("http://", "https://")):
-                # Download remote image to temp file
+                # Download remote image to temp file (cleaned up in finally)
                 tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                async with self._session.get(image_url, timeout=_aiohttp.ClientTimeout(total=30)) as resp:
-                    resp.raise_for_status()
-                    tmp.write(await resp.read())
-                tmp.close()
+                try:
+                    async with self._session.get(image_url, timeout=_aiohttp.ClientTimeout(total=30)) as resp:
+                        resp.raise_for_status()
+                        tmp.write(await resp.read())
+                finally:
+                    tmp.close()
                 file_path = tmp.name
             else:
                 file_path = image_url.replace("file://", "")
@@ -1227,6 +1432,14 @@ class WeixinAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("weixin: send_image failed to=%s: %s", chat_id[:8], e)
             return SendResult(success=False, error=str(e))
+        finally:
+            # Clean up temp file from remote URL download
+            if image_url.startswith(("http://", "https://")) and 'file_path' in dir() \
+                    and os.path.exists(file_path):
+                try:
+                    os.unlink(file_path)
+                except Exception:
+                    pass
 
     async def send_document(
         self,
