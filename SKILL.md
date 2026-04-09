@@ -88,7 +88,9 @@ elif platform == Platform.WEIXIN:
 生成二维码给你扫描。请准备好你的手机微信。
 ```
 
-**生成并运行登录脚本**：
+**方式 A：Agent 后台执行（推荐）**
+
+生成并运行登录脚本：
 
 ```bash
 cat > /tmp/weixin-login.py << 'PYEOF'
@@ -115,6 +117,29 @@ cd ~/.hermes/hermes-agent && .venv/bin/python /tmp/weixin-login.py
 - 必须使用 `background=true` 运行此命令（因为扫码需要时间）
 - 用 `process(action="poll")` 监控进度
 - 当用户看到二维码 URL 后，提醒他用手机微信扫一扫
+
+**方式 B：备用方案（如果用户看不到二维码）**
+
+如果后台运行导致用户无法看到二维码输出，告诉用户：
+
+```
+⚠️ 看起来终端输出被拦截了，无法显示二维码。
+没关系，请按以下步骤操作：
+
+1. 打开一个新的终端窗口（Terminal / CMD）
+2. 复制粘贴以下命令并回车执行：
+【粘贴单行登录脚本】
+3. 终端会显示二维码 URL，用手机微信扫一扫并在微信内确认
+4. 登录成功后，把终端输出的 JSON 内容复制发给我
+```
+
+单行登录脚本（让用户复制）：
+
+```bash
+cd ~/.hermes/hermes-agent && .venv/bin/python -c "import asyncio,json,sys,os; sys.path.insert(0,'.'); from gateway.platforms.weixin import qr_login; r=asyncio.run(qr_login(os.path.expanduser('~/.hermes'))); open('/tmp/weixin_login_result.json','w').write(json.dumps(r,indent=2)) if r else sys.exit(1); print(json.dumps(r,indent=2))"
+```
+
+用户把 JSON 发回来后，继续 Phase 6 写入配置。
 
 **扫码后的状态流转**：
 1. `wait` → 等待扫码（显示 `.`）

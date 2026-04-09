@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <strong>扫码关注公众号「铁柱的AI进化论」</strong><br/>
-  获取更多 Hermes / AI Agent 实战教程与前沿动态
+  <strong>扫码关注公众号「铁柱AGI」</strong><br/>
+  获取更多 Hermes / OpenClaw / AI Agent 实战教程与前沿动态
 </p>
 
 ---
@@ -103,46 +103,17 @@ Hermes 的平台适配器采用**内置注册制** —— 所有平台（Telegra
 
 ### 给 Hermes Agent 的指令
 
-把下面这段话发给你的 Hermes Agent，它会自动完成从拉取代码到配置的全部流程：
+把下面这段话发给你的 Hermes Agent，它会自动完成全部安装流程：
 
 ```
-请帮我安装微信渠道适配器。按以下步骤执行：
+请帮我安装微信渠道适配器。
 
-第一步：从 GitHub 拉取项目代码
-执行 git clone git@github.com:RongleCat/hermes-wechat.git 到临时目录，
-然后查看 references/weixin.py 和 SKILL.md 的内容。
+从 GitHub 克隆这个项目：
+git clone git@github.com:RongleCat/hermes-wechat.git /tmp/hermes-wechat
 
-第二步：安装 Python 依赖
-在 ~/.hermes/hermes-agent 目录下执行：
-uv add aiohttp cryptography qrcode pillow
-
-第三步：部署适配器文件
-把 references/weixin.py 复制到 ~/.hermes/hermes-agent/gateway/platforms/weixin.py
-
-第四步：修改 Hermes 核心文件
-在 gateway/config.py 的 Platform 枚举中 WECOM = "wecom" 后面加一行：
-WEIXIN = "weixin",
-在 gateway/run.py 的 _create_adapter() 方法中 WECOM 分支后面加一个 elif 分支：
-elif platform == Platform.WEIXIN:
-    from gateway.platforms.weixin import WeixinAdapter, check_weixin_requirements
-    if not check_weixin_requirements():
-        logger.warning("WeChat: aiohttp/cryptography not installed")
-        return None
-    return WeixinAdapter(config)
-
-第五步：引导我扫码登录
-生成登录脚本并用后台模式运行，把二维码 URL 展示给我。
-我扫完码确认后，读取登录结果。
-
-第六步：写入配置
-把登录获得的 account_id、token、user_id 写入 ~/.hermes/config.yaml 的 platforms.weixin 配置段，
-同时在 platform_toolsets 中加入 weixin 条目，在 .env 文件中加入 GATEWAY_ALLOW_ALL_USERS=true。
-
-第七步：询问我是否重启网关
-配置写完后问我是否需要重启，如果我说重启就执行重启操作。
-
-第八步：验证连接
-重启后检查日志确认微信连接成功。
+然后读取 SKILL.md，按照里面的完整流程（8 个 Phase）逐步执行，
+包括环境检查、依赖安装、适配器部署、核心文件 Patch、扫码登录、
+配置写入、重启网关、连接验证。
 ```
 
 ### 手动安装（如果不使用 Hermes 自动化）
@@ -199,6 +170,8 @@ elif platform == Platform.WEIXIN:
 
 ### Step 5: 扫码登录
 
+**方式 A：在当前终端执行（推荐）**
+
 ```bash
 cat > /tmp/weixin-login.py << 'PYEOF'
 import asyncio, json, sys, os
@@ -221,6 +194,29 @@ cd ~/.hermes/hermes-agent && .venv/bin/python /tmp/weixin-login.py
 ```
 
 终端会输出二维码 URL，用手机微信扫描并在微信内确认登录。
+
+**方式 B：备用方案（如果看不到二维码）**
+
+如果 Hermes 在后台运行导致你无法看到二维码输出，请按以下步骤操作：
+
+1. 打开一个新的终端窗口
+2. 执行以下命令（直接复制粘贴）：
+
+```bash
+cd ~/.hermes/hermes-agent && .venv/bin/python -c "
+import asyncio, json, sys, os
+sys.path.insert(0, '.')
+from gateway.platforms.weixin import qr_login
+result = asyncio.run(qr_login(os.path.expanduser('~/.hermes')))
+if result:
+    with open('/tmp/weixin_login_result.json','w') as f: json.dump(result,f,indent=2)
+    print(json.dumps(result,indent=2))
+else: sys.exit(1)
+"
+```
+
+3. 终端会显示二维码 URL，用手机微信扫码并确认
+4. 登录成功后，把终端输出的 JSON 信息复制给 Hermes Agent，它会自动写入配置
 
 ### Step 6: 写入配置
 
