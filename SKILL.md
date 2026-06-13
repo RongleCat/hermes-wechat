@@ -2,6 +2,9 @@
 name: hermes-weixin-setup
 description: 在 Hermes Agent 上安装微信 (iLink Bot API) 平台适配器，完成从依赖安装到扫码登录的全流程。一键安装，扫码即用。
 category: devops
+version: 1.0.0
+license: MIT
+metadata.hermes.tags: []
 ---
 
 # Hermes 微信 (iLink Bot API) 适配器 — 完整安装指南
