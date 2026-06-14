@@ -1,8 +1,8 @@
 ---
-name: hermes-weixin-setup
-description: 在 Hermes Agent 上安装微信 (iLink Bot API) 平台适配器，完成从依赖安装到扫码登录的全流程。一键安装，扫码即用。
-category: devops
----
+name: "hermes-weixin-setup"
+description: "Use when \u5728 Hermes Agent \u4e0a\u5b89\u88c5\u5fae\u4fe1 (iLink Bot API) \u5e73\u53f0\u9002\u914d\u5668\uff0c\u5b8c\u6210\u4ece\u4f9d\u8d56\u5b89\u88c5\u5230\u626b\u7801\u767b\u5f55\u7684\u5168\u6d41\u7a0b\u3002\u4e00\u952e\u5b89\u88c5\uff0c\u626b\u7801\u5373\u7528\u3002"
+category: "devops"
+----
 
 # Hermes 微信 (iLink Bot API) 适配器 — 完整安装指南
 
